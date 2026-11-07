@@ -44,6 +44,11 @@ input[type=range]{flex:1;min-width:120px}
     </select>
   </div>
   <div class="row">
+    <label><input id="mg" type="checkbox" checked> ลายเส้นมังงะ</label>
+    <label for="lw">หนา</label>
+    <input id="lw" type="range" min="1" max="6" step="0.5" value="2.5">
+  </div>
+  <div class="row">
     <label for="size">ขนาดพื้นที่</label>
     <input id="size" type="range" min="0.2" max="2" step="0.1" value="0.6">
     <b id="sz"></b>
@@ -291,13 +296,13 @@ function addBuilding(p, h, T, hf) {
 function assemble(raw, tr) {
   const on = tr && $('ct').checked;
   const hf = on ? tr.h : () => 0;
-  const tris = [], rtris = [], roads = [];
+  const tris = [], rtris = [], roads = [], redges = [];
   for (const o of raw.B) addBuilding(o.p, o.h, tris, hf);
-  for (const o of raw.R) addRoad(o.p, o.w, hf, rtris, roads);
-  return {tris, rtris, roads, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
+  for (const o of raw.R) addRoad(o.p, o.w, hf, rtris, roads, redges);
+  return {tris, rtris, roads, redges, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
 }
 
-function addRoad(p, w, hf, R, C) {            // ถนนเป็นแถบกว้างตามประเภท วางทับพื้นดินสูงขึ้น 0.3 ม.
+function addRoad(p, w, hf, R, C, EG) {            // ถนนเป็นแถบกว้างตามประเภท วางทับพื้นดินสูงขึ้น 0.3 ม.
   const q = [p[0]];
   for (let i = 1; i < p.length; i++) {
     const a = p[i-1], b = p[i], n = Math.max(1, Math.ceil(Math.hypot(b[0]-a[0], b[1]-a[1])/10));
@@ -311,6 +316,7 @@ function addRoad(p, w, hf, R, C) {            // ถนนเป็นแถบ�
     const A = [q[i][0]+nx, q[i][1]+ny, z[i]], B = [q[i][0]-nx, q[i][1]-ny, z[i]];
     const D = [q[i+1][0]-nx, q[i+1][1]-ny, z[i+1]], E = [q[i+1][0]+nx, q[i+1][1]+ny, z[i+1]];
     R.push(...A, ...B, ...D, ...A, ...D, ...E);
+    EG.push(...A, ...E, ...B, ...D);
   }
 }
 
@@ -339,7 +345,7 @@ function terrMesh(tr, raw) {                  // ตารางละ 2 สา�
 }
 
 /* ---------- 4. แสดงตัวอย่าง 3 มิติ (Three.js) ---------- */
-let ren, scene, cam, grp;
+let ren, scene, cam, grp, lineMat, edgeGrp;
 const rot = {a:.8, e:.7, d:600};
 const dark = matchMedia('(prefers-color-scheme: dark)').matches;
 
@@ -353,6 +359,25 @@ function initThree() {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x777777, .85));
   const d = new THREE.DirectionalLight(0xffffff, .6); d.position.set(1,2,.5); scene.add(d);
   grp = new THREE.Group(); scene.add(grp);
+  lineMat = new THREE.ShaderMaterial({         // เส้นหนาในหน่วยพิกเซล ขยายเป็นแถบบนหน้าจอ
+    uniforms: {res: {value: new THREE.Vector2(1,1)}, width: {value: 3}, color: {value: new THREE.Color(dark ? 0xf2f2f2 : 0x111111)}},
+    vertexShader: `
+      attribute vec3 pb; attribute vec2 corner;
+      uniform vec2 res; uniform float width;
+      void main() {
+        mat4 m = projectionMatrix * modelViewMatrix;
+        vec4 ca = m * vec4(position, 1.0), cb = m * vec4(pb, 1.0);
+        vec2 sa = ca.xy/ca.w*res*.5, sb = cb.xy/cb.w*res*.5;
+        vec2 d = sb - sa; float l = length(d);
+        d = l > 1e-4 ? d/l : vec2(1.0, 0.0);
+        vec2 n = vec2(-d.y, d.x);
+        vec4 c = corner.x < .5 ? ca : cb;
+        vec2 off = (n*corner.y + d*(corner.x < .5 ? -1.0 : 1.0)) * width * .5;
+        gl_Position = vec4(c.xy + off*2.0/res*c.w, c.z - 3e-4*c.w, c.w);
+      }`,
+    fragmentShader: 'uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }',
+    side: THREE.DoubleSide
+  });
 
   const el = ren.domElement, ptr = new Map();
   el.onpointerdown = e => { el.setPointerCapture(e.pointerId); ptr.set(e.pointerId, [e.clientX, e.clientY]); };
@@ -377,7 +402,7 @@ function resize() {
   if (!ren) return;
   const v = $('view'), w = v.clientWidth, h = v.clientHeight;
   if (!w || !h) return;
-  ren.setSize(w, h); cam.aspect = w/h; cam.updateProjectionMatrix(); draw();
+  ren.setSize(w, h); cam.aspect = w/h; cam.updateProjectionMatrix(); applyLines();
 }
 function draw() {
   const {a,e,d} = rot;
@@ -391,13 +416,42 @@ function viewMode(on) {
 }
 $('back').onclick = () => viewMode(false);
 
+function fatLines(P) {                        // P = [ax,ay,az,bx,by,bz, ...] → แถบเส้นหนา
+  const n = P.length/6, pos = new Float32Array(n*12), pb = new Float32Array(n*12);
+  const co = new Float32Array(n*8), ix = new Uint32Array(n*6);
+  for (let s = 0; s < n; s++) {
+    for (let v = 0; v < 4; v++) {
+      const o = (s*4+v)*3;
+      for (let k = 0; k < 3; k++) { pos[o+k] = P[s*6+k]; pb[o+k] = P[s*6+3+k]; }
+      co[(s*4+v)*2] = v >> 1; co[(s*4+v)*2+1] = (v & 1) ? 1 : -1;
+    }
+    ix.set([s*4, s*4+1, s*4+2, s*4+2, s*4+1, s*4+3], s*6);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('pb', new THREE.BufferAttribute(pb, 3));
+  g.setAttribute('corner', new THREE.BufferAttribute(co, 2));
+  g.setIndex(new THREE.BufferAttribute(ix, 1));
+  const m = new THREE.Mesh(g, lineMat);
+  m.frustumCulled = false;
+  return m;
+}
+function applyLines() {
+  if (!ren) return;
+  lineMat.uniforms.width.value = +$('lw').value * ren.getPixelRatio();
+  ren.getDrawingBufferSize(lineMat.uniforms.res.value);
+  if (edgeGrp) edgeGrp.visible = $('mg').checked;
+  draw();
+}
+$('mg').onchange = $('lw').oninput = applyLines;
+
 function meshOf(T, color) {                   // สามเหลี่ยม Z-up → mesh ของ Three (Y-up)
   const pos = new Float32Array(T.length);
   for (let i = 0; i < T.length; i += 3) { pos[i] = T[i]; pos[i+1] = T[i+2]; pos[i+2] = -T[i+1]; }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.computeVertexNormals();
-  return new THREE.Mesh(g, new THREE.MeshLambertMaterial({color, side: THREE.DoubleSide}));
+  return new THREE.Mesh(g, new THREE.MeshLambertMaterial({color, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1}));
 }
 
 function show() {
@@ -408,8 +462,15 @@ function show() {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.computeVertexNormals();
-  grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: dark ? 0x9aa3ad : 0xcdc8bd, side: THREE.DoubleSide})));
+  grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: dark ? 0x9aa3ad : 0xcdc8bd, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1})));
+  edgeGrp = new THREE.Group(); grp.add(edgeGrp);
+  if (M.tris.length) edgeGrp.add(fatLines(new THREE.EdgesGeometry(g, 25).attributes.position.array));
   if (M.rtris.length) grp.add(meshOf(M.rtris, dark ? 0xd8d8d8 : 0x3a3f47));
+  if (M.redges.length) {
+    const P = [];
+    for (let i = 0; i < M.redges.length; i += 3) P.push(M.redges[i], M.redges[i+2], -M.redges[i+1]);
+    edgeGrp.add(fatLines(P));
+  }
   const cols = [dark ? 0x4a5560 : 0xb9b3a4, 0x3f86c9, 0x6fa86a];   // ดิน, น้ำ, สีเขียว
   for (let c = 0; c < 3; c++) {
     const T = [];
