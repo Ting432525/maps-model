@@ -54,7 +54,7 @@ input[type=range]{flex:1;min-width:120px}
   </div>
   <div class="row">
     <label for="size">ขนาดพื้นที่</label>
-    <input id="size" type="range" min="0.2" max="2" step="0.1" value="0.6">
+    <input id="size" type="range" min="0.2" max="5" step="0.1" value="0.6">
     <b id="sz"></b>
   </div>
   <div class="row">
@@ -65,6 +65,10 @@ input[type=range]{flex:1;min-width:120px}
   <div class="row">
     <button id="dxf" disabled>ดาวน์โหลด DXF</button>
     <button id="stl" disabled>ดาวน์โหลด STL</button>
+    <button id="dae" disabled>ดาวน์โหลด DAE (SketchUp)</button>
+    <button id="obj" disabled>ดาวน์โหลด OBJ</button>
+    <button id="svg" disabled>ดาวน์โหลด SVG (Illustrator)</button>
+    <button id="ifc" disabled>ดาวน์โหลด IFC</button>
   </div>
   <div id="st">เลื่อนแผนที่ให้กรอบอยู่ตรงพื้นที่ที่ต้องการ แล้วกด "สร้างโมเดล"</div>
 </div>
@@ -106,15 +110,21 @@ async function build() {
   $('go').disabled = true;
   $('st').textContent = 'กำลังดึงข้อมูลอาคารและถนน...';
   const bb = `${b.s},${b.w},${b.n},${b.e}`;
-  const q = `[out:json][timeout:40];(way["building"](${bb});way["highway"](${bb});way["natural"~"^(water|wood)$"](${bb});way["leisure"="park"](${bb});way["landuse"~"^(grass|forest|meadow)$"](${bb}););out geom;`;
+  const q = `[out:json][timeout:90];(way["building"](${bb});way["highway"](${bb});way["natural"~"^(water|wood)$"](${bb});way["leisure"="park"](${bb});way["landuse"~"^(grass|forest|meadow)$"](${bb}););out geom;`;
   try {
-    const r = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'data=' + encodeURIComponent(q)
-    });
-    if (!r.ok) throw new Error('เซิร์ฟเวอร์ตอบ ' + r.status);
-    const j = await r.json();
+    let j = null, last = '';
+    for (const ep of ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter']) {
+      try {
+        const r = await fetch(ep, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'data=' + encodeURIComponent(q)
+        });
+        if (!r.ok) throw new Error('เซิร์ฟเวอร์ตอบ ' + r.status);
+        j = await r.json(); break;
+      } catch (e) { last = e.message; }
+    }
+    if (!j) throw new Error(last);
     const raw = convert(j.elements, b);
     if (!raw.B.length && !raw.R.length) throw new Error('ไม่พบข้อมูลในพื้นที่นี้');
     let note = '', tr = null;
@@ -127,9 +137,10 @@ async function build() {
       } catch (err) { note = ' · ดึงข้อมูลความสูงไม่ได้ (' + err.message + ')'; }
     }
     M = assemble(raw, tr);
+    M.lat = b.c.lat; M.lng = b.c.lng;
     show();
-    $('st').textContent = `อาคาร ${M.nb} หลัง · ถนน ${M.roads.length} เส้น` + note + ' · หน่วยเป็นเมตร จุดกำเนิดอยู่กลางพื้นที่';
-    $('dxf').disabled = $('stl').disabled = $('back').disabled = false;
+    $('st').textContent = `อาคาร ${M.nb} หลัง · ถนน ${M.roads.length} เส้น` + note + (M.nb > 15000 ? ' · ตึกมากกว่า 15,000 หลัง จึงไม่วาดลายเส้นมังงะรอบตึก' : '') + ' · หน่วยเป็นเมตร จุดกำเนิดอยู่กลางพื้นที่';
+    $('dxf').disabled = $('stl').disabled = $('dae').disabled = $('obj').disabled = $('svg').disabled = $('ifc').disabled = $('back').disabled = false;
   } catch (e) {
     $('st').textContent = 'ผิดพลาด: ' + e.message + ' (ลองลดขนาดพื้นที่แล้วกดใหม่)';
   }
@@ -188,7 +199,7 @@ async function terrain(b, size) {
     const fx = px(lon)-.5, fy = py(lat)-.5, ix = Math.floor(fx), iy = Math.floor(fy), u = fx-ix, v = fy-iy;
     return (get(ix,iy)*(1-u) + get(ix+1,iy)*u)*(1-v) + (get(ix,iy+1)*(1-u) + get(ix+1,iy+1)*u)*v;
   };
-  const n1 = Math.min(120, Math.max(20, Math.round(size*100)));   // ช่องละประมาณ 10 ม.
+  const n1 = Math.min(200, Math.max(20, Math.round(size*100)));   // ช่องละประมาณ 10 ม.
   const half = size*500, d = size*1000/n1, W = n1+1, Z = new Float32Array(W*W);
   let mn = 1e9, mx = -1e9;
   for (let j = 0; j <= n1; j++) for (let i = 0; i <= n1; i++) {
@@ -301,9 +312,10 @@ function assemble(raw, tr) {
   const on = tr && $('ct').checked;
   const hf = on ? tr.h : () => 0;
   const tris = [], rtris = [], roads = [], redges = [];
-  for (const o of raw.B) addBuilding(o.p, o.h, tris, hf);
+  const bidx = [];
+  for (const o of raw.B) { const s = tris.length; addBuilding(o.p, o.h, tris, hf); bidx.push([s, tris.length]); }
   for (const o of raw.R) addRoad(o.p, o.w, hf, rtris, roads, redges);
-  return {tris, rtris, roads, redges, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
+  return {raw, bidx, tris, rtris, roads, redges, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
 }
 
 function addRoad(p, w, hf, R, C, EG) {            // ถนนเป็นแถบกว้างตามประเภท วางทับพื้นดินสูงขึ้น 0.3 ม.
@@ -472,7 +484,7 @@ function show() {
   g.computeVertexNormals();
   grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: dark ? 0x9aa3ad : 0xcdc8bd, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1})));
   edgeGrp = new THREE.Group(); grp.add(edgeGrp);
-  if (M.tris.length) edgeGrp.add(fatLines(new THREE.EdgesGeometry(g, 25).attributes.position.array));
+  if (M.tris.length && M.nb <= 15000) edgeGrp.add(fatLines(new THREE.EdgesGeometry(g, 25).attributes.position.array));
   if (M.rtris.length) grp.add(meshOf(M.rtris, dark ? 0xd8d8d8 : 0x3a3f47));
   if (M.redges.length) {
     const P = [];
@@ -560,6 +572,132 @@ function exportSTL() {                        // อาคารอย่าง�
   out.push('endsolid city');
   dl('city.stl', out.join('\n'), 'model/stl');
 }
+/* ---------- 5.1 DAE (Collada) และ OBJ สำหรับ SketchUp / Rhino / Blender ---------- */
+function parts() {                            // แยกกลุ่มวัตถุตามวัสดุ
+  const P = [{n:'BUILDINGS', T:M.tris, c:[.80,.78,.73]}, {n:'ROADS', T:M.rtris, c:[.23,.25,.28]}];
+  [['TERRAIN',[.72,.70,.64]], ['WATER',[.25,.53,.79]], ['GREEN',[.44,.66,.42]]].forEach(([n, c], i) => {
+    const T = [];
+    for (const q of M.terr) if (q.c === i) T.push(...q.t);
+    P.push({n, T, c});
+  });
+  return P.filter(p => p.T.length);
+}
+function indexed(T) {                         // รวมจุดซ้ำให้ไฟล์เล็กลง
+  const m = new Map(), v = [], f = [];
+  for (let i = 0; i < T.length; i += 3) {
+    const x = T[i].toFixed(3), y = T[i+1].toFixed(3), z = T[i+2].toFixed(3), k = x+','+y+','+z;
+    let j = m.get(k);
+    if (j === undefined) { j = v.length/3; m.set(k, j); v.push(+x, +y, +z); }
+    f.push(j);
+  }
+  return {v, f};
+}
+function exportOBJ() {
+  const out = ['# urban model  units: meters  Z-up']; let off = 0;
+  for (const p of parts()) {
+    const {v, f} = indexed(p.T);
+    out.push('g ' + p.n);
+    for (let i = 0; i < v.length; i += 3) out.push(`v ${v[i]} ${v[i+1]} ${v[i+2]}`);
+    for (let i = 0; i < f.length; i += 3) out.push(`f ${f[i]+1+off} ${f[i+1]+1+off} ${f[i+2]+1+off}`);
+    off += v.length/3;
+  }
+  dl('city.obj', out.join('\n'), 'text/plain');
+}
+function exportDAE() {
+  const P = parts(), col = c => c.map(x => x.toFixed(3)).join(' ');
+  let fx = '', mt = '', ge = '', nd = '';
+  P.forEach((p, i) => {
+    const {v, f} = indexed(p.T);
+    fx += `<effect id="m${i}-fx"><profile_COMMON><technique sid="common"><lambert><diffuse><color>${col(p.c)} 1</color></diffuse></lambert></technique></profile_COMMON></effect>`;
+    mt += `<material id="m${i}" name="${p.n}"><instance_effect url="#m${i}-fx"/></material>`;
+    ge += `<geometry id="g${i}" name="${p.n}"><mesh><source id="g${i}-p"><float_array id="g${i}-a" count="${v.length}">${v.join(' ')}</float_array><technique_common><accessor source="#g${i}-a" count="${v.length/3}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source><vertices id="g${i}-v"><input semantic="POSITION" source="#g${i}-p"/></vertices><triangles material="m${i}" count="${f.length/3}"><input semantic="VERTEX" source="#g${i}-v" offset="0"/><p>${f.join(' ')}</p></triangles></mesh></geometry>`;
+    nd += `<node id="n${i}" name="${p.n}"><instance_geometry url="#g${i}"><bind_material><technique_common><instance_material symbol="m${i}" target="#m${i}"/></technique_common></bind_material></instance_geometry></node>`;
+  });
+  const xml = `<?xml version="1.0" encoding="utf-8"?>\n<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1"><asset><unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset><library_effects>${fx}</library_effects><library_materials>${mt}</library_materials><library_geometries>${ge}</library_geometries><library_visual_scenes><visual_scene id="Scene" name="Scene">${nd}</visual_scene></library_visual_scenes><scene><instance_visual_scene url="#Scene"/></scene></COLLADA>`;
+  dl('city.dae', xml, 'model/vnd.collada+xml');
+}
+/* ---------- 5.2 SVG (ผังมุมมองจากด้านบน) และ IFC4 ---------- */
+function exportSVG() {                        // 1 หน่วย = 1 เมตร แยกเลเยอร์เป็นกลุ่ม <g id=...>
+  const half = +$('size').value*500, R = M.raw, f = v => v.toFixed(2);
+  const pts = p => p.map(v => f(v[0]) + ',' + f(-v[1])).join(' ');
+  let s = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${half*2}" height="${half*2}" viewBox="${-half} ${-half} ${half*2} ${half*2}">\n`;
+  s += `<defs><clipPath id="clip"><rect x="${-half}" y="${-half}" width="${half*2}" height="${half*2}"/></clipPath></defs>\n`;
+  s += '<g clip-path="url(#clip)" fill="none" stroke-linejoin="round" stroke-linecap="round">\n';
+  s += '<g id="GREEN" fill="#d6ead0" stroke="#111" stroke-width="0.5">' + R.G.map(p => `<polygon points="${pts(p)}"/>`).join('') + '</g>\n';
+  s += '<g id="WATER" fill="#bfe0f5" stroke="#111" stroke-width="0.5">' + R.W.map(p => `<polygon points="${pts(p)}"/>`).join('') + '</g>\n';
+  s += '<g id="CONTOURS" stroke="#9a6b3d" stroke-width="0.3">' + (M.contours || []).map(c => `<polyline points="${pts(c.pts)}"/>`).join('') + '</g>\n';
+  s += '<g id="ROADS_CASING" stroke="#111">' + R.R.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w+1.2}"/>`).join('') + '</g>\n';
+  s += '<g id="ROADS" stroke="#fff">' + R.R.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w}"/>`).join('') + '</g>\n';
+  s += '<g id="BUILDINGS" fill="#e6e1d6" stroke="#111" stroke-width="0.8">' + R.B.map(o => `<polygon points="${pts(o.p)}"/>`).join('') + '</g>\n';
+  s += '</g>\n</svg>\n';
+  dl('city.svg', s, 'image/svg+xml');
+}
+
+function exportIFC() {                        // IFC4 ใช้ IfcTriangulatedFaceSet: ตึกแยกหลัง ถนน และภูมิประเทศ
+  const L = []; let id = 0;
+  const add = s => { L.push(`#${++id}=${s};`); return '#' + id; };
+  const cs = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
+  const guid = () => {                        // GlobalId 22 ตัวอักษรตามมาตรฐาน IFC
+    let n = 0n;
+    for (const x of crypto.getRandomValues(new Uint8Array(16))) n = (n << 8n) | BigInt(x);
+    let g = '';
+    for (let i = 0; i < 22; i++) { g = cs[Number(n & 63n)] + g; n >>= 6n; }
+    return g;
+  };
+  const r = v => (+v).toFixed(3);
+  const dms = v => {
+    const sg = v < 0 ? -1 : 1; v = Math.abs(v);
+    const d = Math.floor(v), m = Math.floor((v-d)*60), sc = Math.floor(((v-d)*60-m)*60);
+    const u = Math.round((((v-d)*60-m)*60-sc)*1e6);
+    return `(${sg*d},${sg*m},${sg*sc},${sg*u})`;
+  };
+  const o0 = add('IFCCARTESIANPOINT((0.,0.,0.))');
+  const dz = add('IFCDIRECTION((0.,0.,1.))'), dx = add('IFCDIRECTION((1.,0.,0.))');
+  const ax = add(`IFCAXIS2PLACEMENT3D(${o0},${dz},${dx})`);
+  const ctx = add(`IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,${ax},$)`);
+  const sub = add(`IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Body','Model',*,*,*,*,${ctx},$,.MODEL_VIEW.,$)`);
+  const un = add('IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.)');
+  const ua = add(`IFCUNITASSIGNMENT((${un}))`);
+  const prj = add(`IFCPROJECT('${guid()}',$,'Urban Model',$,$,$,$,(${ctx}),${ua})`);
+  const pl0 = add(`IFCLOCALPLACEMENT($,${ax})`);
+  const site = add(`IFCSITE('${guid()}',$,'Site',$,$,${pl0},$,$,.ELEMENT.,${dms(M.lat || 0)},${dms(M.lng || 0)},0.,$,$)`);
+  const pl = add(`IFCLOCALPLACEMENT(${pl0},${ax})`);
+  const body = T => {
+    const {v, f} = indexed(T), P = [], I = [];
+    for (let i = 0; i < v.length; i += 3) P.push(`(${r(v[i])},${r(v[i+1])},${r(v[i+2])})`);
+    for (let i = 0; i < f.length; i += 3) I.push(`(${f[i]+1},${f[i+1]+1},${f[i+2]+1})`);
+    const pt = add(`IFCCARTESIANPOINTLIST3D((${P.join(',')}))`);
+    const fs = add(`IFCTRIANGULATEDFACESET(${pt},$,$,(${I.join(',')}),$)`);
+    const rp = add(`IFCSHAPEREPRESENTATION(${sub},'Body','Tessellation',(${fs}))`);
+    return add(`IFCPRODUCTDEFINITIONSHAPE($,$,(${rp}))`);
+  };
+  const blds = [], others = [];
+  M.bidx.forEach(([a, b], i) => {
+    const sh = body(M.tris.slice(a, b));
+    blds.push(add(`IFCBUILDING('${guid()}',$,'Building ${i+1}',$,$,${pl},${sh},$,.ELEMENT.,$,$,$)`));
+  });
+  if (M.rtris.length) {
+    const sh = body(M.rtris);
+    others.push(add(`IFCBUILDINGELEMENTPROXY('${guid()}',$,'Roads',$,$,${pl},${sh},$,.NOTDEFINED.)`));
+  }
+  ['Terrain', 'Water', 'Green'].forEach((n, c) => {
+    const T = [];
+    for (const q of M.terr) if (q.c === c) T.push(...q.t);
+    if (!T.length) return;
+    const sh = body(T);
+    others.push(add(`IFCGEOGRAPHICELEMENT('${guid()}',$,'${n}',$,$,${pl},${sh},$,.TERRAIN.)`));
+  });
+  add(`IFCRELAGGREGATES('${guid()}',$,$,$,${prj},(${site}))`);
+  if (blds.length) add(`IFCRELAGGREGATES('${guid()}',$,$,$,${site},(${blds.join(',')}))`);
+  if (others.length) add(`IFCRELCONTAINEDINSPATIALSTRUCTURE('${guid()}',$,$,$,(${others.join(',')}),${site})`);
+  const t = new Date().toISOString().slice(0, 19);
+  const txt = `ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition [ReferenceView_V1.2]'),'2;1');\nFILE_NAME('city.ifc','${t}',(''),(''),'Urban Model','Urban Model','');\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n${L.join('\n')}\nENDSEC;\nEND-ISO-10303-21;\n`;
+  dl('city.ifc', txt, 'application/x-step');
+}
+$('svg').onclick = exportSVG;
+$('ifc').onclick = exportIFC;
+$('dae').onclick = exportDAE;
+$('obj').onclick = exportOBJ;
 $('dxf').onclick = exportDXF;
 $('stl').onclick = exportSTL;
 </script>
