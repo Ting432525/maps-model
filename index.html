@@ -35,7 +35,8 @@ input[type=range]{flex:1;min-width:120px}
     <button id="sr">ค้นหา</button>
   </div>
   <div class="row">
-    <label><input id="ct" type="checkbox" checked> เส้นชั้นความสูง</label>
+    <label><input id="ct" type="checkbox" checked> ภูมิประเทศ 3D</label>
+    <label><input id="cl" type="checkbox" checked> เส้นชั้นความสูง</label>
     <label for="iv">ทุก</label>
     <select id="iv" style="font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)">
       <option value="0">อัตโนมัติ</option><option value="1">1 ม.</option><option value="2">2 ม.</option>
@@ -96,7 +97,7 @@ async function build() {
   $('go').disabled = true;
   $('st').textContent = 'กำลังดึงข้อมูลอาคารและถนน...';
   const bb = `${b.s},${b.w},${b.n},${b.e}`;
-  const q = `[out:json][timeout:30];(way["building"](${bb});way["highway"](${bb}););out geom;`;
+  const q = `[out:json][timeout:40];(way["building"](${bb});way["highway"](${bb});way["natural"~"^(water|wood)$"](${bb});way["leisure"="park"](${bb});way["landuse"~"^(grass|forest|meadow)$"](${bb}););out geom;`;
   try {
     const r = await fetch('https://overpass-api.de/api/interpreter', {
       method: 'POST',
@@ -105,20 +106,18 @@ async function build() {
     });
     if (!r.ok) throw new Error('เซิร์ฟเวอร์ตอบ ' + r.status);
     const j = await r.json();
-    M = convert(j.elements, b);
-    if (!M.nb && !M.roads.length) throw new Error('ไม่พบข้อมูลในพื้นที่นี้');
-    M.contours = [];
-    let note = '';
-    if ($('ct').checked) {
+    const raw = convert(j.elements, b);
+    if (!raw.B.length && !raw.R.length) throw new Error('ไม่พบข้อมูลในพื้นที่นี้');
+    let note = '', tr = null;
+    if ($('ct').checked || $('cl').checked) {
       $('st').textContent = 'กำลังดึงข้อมูลความสูง...';
       try {
-        const t = await terrain(b, +$('size').value);
-        M.contours = t.contours;
-        note = t.contours.length
-          ? ` · เส้นชั้นความสูง ${t.contours.length} เส้น (ต่ำสุด ${t.min.toFixed(0)} ม. สูงสุด ${t.max.toFixed(0)} ม. จากระดับน้ำทะเล)`
-          : ' · พื้นที่ราบ ไม่มีเส้นชั้นความสูง';
+        tr = await terrain(b, +$('size').value);
+        note = ` · ความสูงพื้นที่ ${tr.min.toFixed(0)}–${tr.max.toFixed(0)} ม. จากระดับน้ำทะเล`
+          + (tr.contours.length ? ` · เส้นชั้นความสูง ${tr.contours.length} เส้น` : '');
       } catch (err) { note = ' · ดึงข้อมูลความสูงไม่ได้ (' + err.message + ')'; }
     }
+    M = assemble(raw, tr);
     show();
     $('st').textContent = `อาคาร ${M.nb} หลัง · ถนน ${M.roads.length} เส้น` + note + ' · หน่วยเป็นเมตร จุดกำเนิดอยู่กลางพื้นที่';
     $('dxf').disabled = $('stl').disabled = $('back').disabled = false;
@@ -191,10 +190,15 @@ async function terrain(b, size) {
   const rg = mx-mn;
   const iv = $('iv').value === '0' ? ([1,2,5,10,20,50,100].find(v => rg/v <= 15) || 200) : +$('iv').value;
   const contours = [];
-  if (rg >= iv)
+  if ($('cl').checked && rg >= iv)
     for (let L = Math.ceil(mn/iv)*iv; L <= mx; L += iv)
       for (const pts of marching(Z, n1, n1, -half, -half, d, d, L)) contours.push({z: L-mn, pts});
-  return {contours, min: mn, max: mx};
+  const h = (x, y) => {                       // ความสูงสัมพัทธ์ที่จุด (x,y) เป็นเมตร
+    const fx = Math.min(n1-1e-6, Math.max(0, (x+half)/d)), fy = Math.min(n1-1e-6, Math.max(0, (y+half)/d));
+    const i = Math.floor(fx), j = Math.floor(fy), u = fx-i, v = fy-j;
+    return (Z[j*W+i]*(1-u) + Z[j*W+i+1]*u)*(1-v) + (Z[(j+1)*W+i]*(1-u) + Z[(j+1)*W+i+1]*u)*v - mn;
+  };
+  return {contours, min: mn, max: mx, n1, half, d, Z, mn, h};
 }
 
 function marching(Z, nx, ny, x0, y0, dx, dy, L) {   // marching squares แล้วต่อเส้นเป็นสายยาว
@@ -242,31 +246,36 @@ function marching(Z, nx, ny, x0, y0, dx, dy, L) {   // marching squares แล�
 function convert(els, b) {
   const kx = 111320*Math.cos(b.c.lat*Math.PI/180), ky = 110540;
   const P = g => g.map(p => [(p.lon-b.c.lng)*kx, (p.lat-b.c.lat)*ky]);
-  const tris = [], roads = []; let nb = 0;
+  const B = [], R = [], W = [], G = [];
+  const poly = g => {
+    const p = P(g), f = p[0], l = p[p.length-1];
+    if (p.length > 1 && f[0] === l[0] && f[1] === l[1]) p.pop();
+    return p;
+  };
+  const RW = {motorway:14, trunk:14, primary:11, secondary:9, tertiary:7, residential:6, unclassified:6, service:4};
   for (const el of els) {
     if (!el.geometry) continue;
     const t = el.tags || {};
     if (t.building) {
-      const pts = P(el.geometry);
-      const f = pts[0], l = pts[pts.length-1];
-      if (pts.length > 1 && f[0] === l[0] && f[1] === l[1]) pts.pop();
-      if (pts.length < 3) continue;
+      const p = poly(el.geometry); if (p.length < 3) continue;
       let h = parseFloat(t.height);
       if (!(h > 0)) { const lv = parseFloat(t['building:levels']); h = lv > 0 ? lv*3 : 8; }
-      addBuilding(pts, h, tris); nb++;
-    } else if (t.highway) roads.push(P(el.geometry));
+      B.push({p, h});
+    } else if (t.highway) R.push({p: P(el.geometry), w: RW[t.highway] || 3});
+    else if (t.natural === 'water') { const p = poly(el.geometry); if (p.length > 2) W.push(p); }
+    else { const p = poly(el.geometry); if (p.length > 2) G.push(p); }
   }
-  return {tris, roads, nb};
+  return {B, R, W, G};
 }
 
-function addBuilding(p, h, T) {
+function addBuilding(p, h, T, hf) {
   let a = 0;
   for (let i = 0; i < p.length; i++) { const q = p[(i+1)%p.length]; a += p[i][0]*q[1] - q[0]*p[i][1]; }
   if (a < 0) p = p.slice().reverse();          // ให้วนทวนเข็มเสมอ
-  const n = p.length;
+  const n = p.length, zs = p.map(v => hf(v[0], v[1])), top = Math.max(...zs) + h;
   for (let i = 0; i < n; i++) {                // ผนัง
     const A = p[i], B = p[(i+1)%n];
-    T.push(A[0],A[1],0, B[0],B[1],0, B[0],B[1],h,  A[0],A[1],0, B[0],B[1],h, A[0],A[1],h);
+    T.push(A[0],A[1],zs[i], B[0],B[1],zs[(i+1)%n], B[0],B[1],top,  A[0],A[1],zs[i], B[0],B[1],top, A[0],A[1],top);
   }
   let tr = [];                                 // หลังคา
   try { tr = THREE.ShapeUtils.triangulateShape(p.map(x => new THREE.Vector2(x[0],x[1])), []); } catch (e) {}
@@ -274,8 +283,59 @@ function addBuilding(p, h, T) {
     let [i,j,k] = t;
     const cz = (p[j][0]-p[i][0])*(p[k][1]-p[i][1]) - (p[j][1]-p[i][1])*(p[k][0]-p[i][0]);
     if (cz < 0) [j,k] = [k,j];                 // หันหน้าขึ้นฟ้า
-    T.push(p[i][0],p[i][1],h, p[j][0],p[j][1],h, p[k][0],p[k][1],h);
+    T.push(p[i][0],p[i][1],top, p[j][0],p[j][1],top, p[k][0],p[k][1],top);
   }
+}
+
+/* ---------- 3.1 ประกอบโมเดล: อาคาร/ถนนวางบนพื้นดิน + พื้นผิวภูมิประเทศ ---------- */
+function assemble(raw, tr) {
+  const on = tr && $('ct').checked;
+  const hf = on ? tr.h : () => 0;
+  const tris = [], rtris = [], roads = [];
+  for (const o of raw.B) addBuilding(o.p, o.h, tris, hf);
+  for (const o of raw.R) addRoad(o.p, o.w, hf, rtris, roads);
+  return {tris, rtris, roads, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
+}
+
+function addRoad(p, w, hf, R, C) {            // ถนนเป็นแถบกว้างตามประเภท วางทับพื้นดินสูงขึ้น 0.3 ม.
+  const q = [p[0]];
+  for (let i = 1; i < p.length; i++) {
+    const a = p[i-1], b = p[i], n = Math.max(1, Math.ceil(Math.hypot(b[0]-a[0], b[1]-a[1])/10));
+    for (let k = 1; k <= n; k++) q.push([a[0]+(b[0]-a[0])*k/n, a[1]+(b[1]-a[1])*k/n]);
+  }
+  const z = q.map(v => hf(v[0], v[1]) + .3);
+  C.push(q.map((v, i) => [v[0], v[1], z[i]]));
+  for (let i = 0; i < q.length-1; i++) {
+    const dx = q[i+1][0]-q[i][0], dy = q[i+1][1]-q[i][1], l = Math.hypot(dx, dy) || 1;
+    const nx = -dy/l*w/2, ny = dx/l*w/2;
+    const A = [q[i][0]+nx, q[i][1]+ny, z[i]], B = [q[i][0]-nx, q[i][1]-ny, z[i]];
+    const D = [q[i+1][0]-nx, q[i+1][1]-ny, z[i+1]], E = [q[i+1][0]+nx, q[i+1][1]+ny, z[i+1]];
+    R.push(...A, ...B, ...D, ...A, ...D, ...E);
+  }
+}
+
+function terrMesh(tr, raw) {                  // ตารางละ 2 สามเหลี่ยม แยกชนิด 0=ดิน 1=น้ำ 2=พื้นที่สีเขียว
+  const {n1, half, d, Z, mn} = tr, W = n1+1, out = [];
+  const polys = [...raw.W.map(p => [p,1]), ...raw.G.map(p => [p,2])].map(([p, c]) => {
+    const xs = p.map(v => v[0]), ys = p.map(v => v[1]);
+    return {p, c, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys)};
+  });
+  const inside = (x, y, P) => {
+    let r = false;
+    for (let i = 0, j = P.length-1; i < P.length; j = i++)
+      if ((P[i][1] > y) !== (P[j][1] > y) && x < (P[j][0]-P[i][0])*(y-P[i][1])/(P[j][1]-P[i][1]) + P[i][0]) r = !r;
+    return r;
+  };
+  const zz = (a, b) => Z[b*W+a] - mn;
+  for (let j = 0; j < n1; j++) for (let i = 0; i < n1; i++) {
+    const cx = -half + (i+.5)*d, cy = -half + (j+.5)*d;
+    let c = 0;
+    for (const o of polys)
+      if (cx >= o.x0 && cx <= o.x1 && cy >= o.y0 && cy <= o.y1 && inside(cx, cy, o.p)) { if (o.c === 1) { c = 1; break; } c = 2; }
+    const x0 = -half + i*d, y0 = -half + j*d, x1 = x0 + d, y1 = y0 + d;
+    out.push({c, t: [x0,y0,zz(i,j), x1,y0,zz(i+1,j), x1,y1,zz(i+1,j+1), x0,y0,zz(i,j), x1,y1,zz(i+1,j+1), x0,y1,zz(i,j+1)]});
+  }
+  return out;
 }
 
 /* ---------- 4. แสดงตัวอย่าง 3 มิติ (Three.js) ---------- */
@@ -331,6 +391,15 @@ function viewMode(on) {
 }
 $('back').onclick = () => viewMode(false);
 
+function meshOf(T, color) {                   // สามเหลี่ยม Z-up → mesh ของ Three (Y-up)
+  const pos = new Float32Array(T.length);
+  for (let i = 0; i < T.length; i += 3) { pos[i] = T[i]; pos[i+1] = T[i+2]; pos[i+2] = -T[i+1]; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, new THREE.MeshLambertMaterial({color, side: THREE.DoubleSide}));
+}
+
 function show() {
   if (!ren) initThree();
   grp.clear();
@@ -340,15 +409,16 @@ function show() {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.computeVertexNormals();
   grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: dark ? 0x9aa3ad : 0xcdc8bd, side: THREE.DoubleSide})));
-  const Ls = [];
-  for (const r of M.roads) for (let i = 0; i < r.length-1; i++)
-    Ls.push(r[i][0],.3,-r[i][1], r[i+1][0],.3,-r[i+1][1]);
-  const lg = new THREE.BufferGeometry();
-  lg.setAttribute('position', new THREE.Float32BufferAttribute(Ls, 3));
-  grp.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({color: dark ? 0x5aa2e8 : 0x1f5fa8})));
+  if (M.rtris.length) grp.add(meshOf(M.rtris, dark ? 0xd8d8d8 : 0x3a3f47));
+  const cols = [dark ? 0x4a5560 : 0xb9b3a4, 0x3f86c9, 0x6fa86a];   // ดิน, น้ำ, สีเขียว
+  for (let c = 0; c < 3; c++) {
+    const T = [];
+    for (const f of M.terr) if (f.c === c) T.push(...f.t);
+    if (T.length) grp.add(meshOf(T, cols[c]));
+  }
   const Cs = [];
   for (const c of M.contours || []) for (let i = 0; i < c.pts.length-1; i++)
-    Cs.push(c.pts[i][0], c.z, -c.pts[i][1], c.pts[i+1][0], c.z, -c.pts[i+1][1]);
+    Cs.push(c.pts[i][0], c.z+.4, -c.pts[i][1], c.pts[i+1][0], c.z+.4, -c.pts[i+1][1]);
   if (Cs.length) {
     const cg = new THREE.BufferGeometry();
     cg.setAttribute('position', new THREE.Float32BufferAttribute(Cs, 3));
@@ -371,8 +441,8 @@ function dl(name, text, type) {
 function exportDXF() {                        // DXF R12 อ่านได้ทุกเวอร์ชันของ AutoCAD
   const f = v => (+v).toFixed(3), T = M.tris, out = [];
   out.push('0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n1\n0\nLTYPE\n2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0\n0\nENDTAB');
-  out.push('0\nTABLE\n2\nLAYER\n70\n3');
-  for (const l of ['BUILDINGS','ROADS','CONTOURS']) out.push(`0\nLAYER\n2\n${l}\n70\n0\n62\n7\n6\nCONTINUOUS`);
+  out.push('0\nTABLE\n2\nLAYER\n70\n7');
+  for (const l of ['BUILDINGS','ROADS','ROAD_CENTER','CONTOURS','TERRAIN','WATER','GREEN']) out.push(`0\nLAYER\n2\n${l}\n70\n0\n62\n7\n6\nCONTINUOUS`);
   out.push('0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES');
   const idx = [0,3,6,6];
   for (let i = 0; i < T.length; i += 9) {
@@ -380,11 +450,24 @@ function exportDXF() {                        // DXF R12 อ่านได้�
     idx.forEach((k,j) => { s += `\n${10+j}\n${f(T[i+k])}\n${20+j}\n${f(T[i+k+1])}\n${30+j}\n${f(T[i+k+2])}`; });
     out.push(s);
   }
-  for (const r of M.roads) {
+  const faces = (A, layer) => {
+    for (let i = 0; i < A.length; i += 9) {
+      let s = '0\n3DFACE\n8\n' + layer;
+      idx.forEach((k, j) => { s += `\n${10+j}\n${f(A[i+k])}\n${20+j}\n${f(A[i+k+1])}\n${30+j}\n${f(A[i+k+2])}`; });
+      out.push(s);
+    }
+  };
+  faces(M.rtris, 'ROADS');
+  ['TERRAIN', 'WATER', 'GREEN'].forEach((L, c) => {
+    const A = [];
+    for (const q of M.terr) if (q.c === c) A.push(...q.t);
+    faces(A, L);
+  });
+  for (const r of M.roads) {                  // เส้นกลางถนน (3D polyline ตามพื้นดิน)
     if (r.length < 2) continue;
-    out.push('0\nPOLYLINE\n8\nROADS\n66\n1\n70\n8');
-    for (const p of r) out.push(`0\nVERTEX\n8\nROADS\n10\n${f(p[0])}\n20\n${f(p[1])}\n30\n0\n70\n32`);
-    out.push('0\nSEQEND\n8\nROADS');
+    out.push('0\nPOLYLINE\n8\nROAD_CENTER\n66\n1\n70\n8');
+    for (const p of r) out.push(`0\nVERTEX\n8\nROAD_CENTER\n10\n${f(p[0])}\n20\n${f(p[1])}\n30\n${f(p[2])}\n70\n32`);
+    out.push('0\nSEQEND\n8\nROAD_CENTER');
   }
   for (const c of M.contours || []) {
     out.push('0\nPOLYLINE\n8\nCONTOURS\n66\n1\n70\n8');
