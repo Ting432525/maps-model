@@ -49,6 +49,10 @@ input[type=range]{flex:1;min-width:120px}
     <input id="lw" type="range" min="1" max="6" step="0.5" value="2.5">
   </div>
   <div class="row">
+    <label for="rk">เส้นถนน อ่อน–เข้ม</label>
+    <input id="rk" type="range" min="0" max="1" step="0.05" value="1">
+  </div>
+  <div class="row">
     <label for="size">ขนาดพื้นที่</label>
     <input id="size" type="range" min="0.2" max="2" step="0.1" value="0.6">
     <b id="sz"></b>
@@ -345,7 +349,7 @@ function terrMesh(tr, raw) {                  // ตารางละ 2 สา�
 }
 
 /* ---------- 4. แสดงตัวอย่าง 3 มิติ (Three.js) ---------- */
-let ren, scene, cam, grp, lineMat, edgeGrp;
+let ren, scene, cam, grp, lineMat, roadMat, edgeGrp;
 const rot = {a:.8, e:.7, d:600};
 const dark = matchMedia('(prefers-color-scheme: dark)').matches;
 
@@ -360,7 +364,7 @@ function initThree() {
   const d = new THREE.DirectionalLight(0xffffff, .6); d.position.set(1,2,.5); scene.add(d);
   grp = new THREE.Group(); scene.add(grp);
   lineMat = new THREE.ShaderMaterial({         // เส้นหนาในหน่วยพิกเซล ขยายเป็นแถบบนหน้าจอ
-    uniforms: {res: {value: new THREE.Vector2(1,1)}, width: {value: 3}, color: {value: new THREE.Color(dark ? 0xf2f2f2 : 0x111111)}},
+    uniforms: {res: {value: new THREE.Vector2(1,1)}, width: {value: 3}, color: {value: new THREE.Color(dark ? 0xf2f2f2 : 0x111111)}, bg: {value: new THREE.Color(dark ? 0x14191f : 0xf7f6f2)}, k: {value: 1}},
     vertexShader: `
       attribute vec3 pb; attribute vec2 corner;
       uniform vec2 res; uniform float width;
@@ -375,10 +379,13 @@ function initThree() {
         vec2 off = (n*corner.y + d*(corner.x < .5 ? -1.0 : 1.0)) * width * .5;
         gl_Position = vec4(c.xy + off*2.0/res*c.w, c.z - 3e-4*c.w, c.w);
       }`,
-    fragmentShader: 'uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }',
+    fragmentShader: 'uniform vec3 color; uniform vec3 bg; uniform float k; void main() { gl_FragColor = vec4(mix(bg, color, k), 1.0); }',
     side: THREE.DoubleSide
   });
 
+  roadMat = lineMat.clone();                   // วัสดุเส้นถนนแยก ปรับความเข้มได้อิสระ
+  roadMat.uniforms.res = lineMat.uniforms.res;
+  roadMat.uniforms.width = lineMat.uniforms.width;
   const el = ren.domElement, ptr = new Map();
   el.onpointerdown = e => { el.setPointerCapture(e.pointerId); ptr.set(e.pointerId, [e.clientX, e.clientY]); };
   el.onpointerup = el.onpointercancel = e => ptr.delete(e.pointerId);
@@ -416,7 +423,7 @@ function viewMode(on) {
 }
 $('back').onclick = () => viewMode(false);
 
-function fatLines(P) {                        // P = [ax,ay,az,bx,by,bz, ...] → แถบเส้นหนา
+function fatLines(P, mat) {                        // P = [ax,ay,az,bx,by,bz, ...] → แถบเส้นหนา
   const n = P.length/6, pos = new Float32Array(n*12), pb = new Float32Array(n*12);
   const co = new Float32Array(n*8), ix = new Uint32Array(n*6);
   for (let s = 0; s < n; s++) {
@@ -432,7 +439,7 @@ function fatLines(P) {                        // P = [ax,ay,az,bx,by,bz, ...] �
   g.setAttribute('pb', new THREE.BufferAttribute(pb, 3));
   g.setAttribute('corner', new THREE.BufferAttribute(co, 2));
   g.setIndex(new THREE.BufferAttribute(ix, 1));
-  const m = new THREE.Mesh(g, lineMat);
+  const m = new THREE.Mesh(g, mat || lineMat);
   m.frustumCulled = false;
   return m;
 }
@@ -440,10 +447,11 @@ function applyLines() {
   if (!ren) return;
   lineMat.uniforms.width.value = +$('lw').value * ren.getPixelRatio();
   ren.getDrawingBufferSize(lineMat.uniforms.res.value);
+  roadMat.uniforms.k.value = +$('rk').value;
   if (edgeGrp) edgeGrp.visible = $('mg').checked;
   draw();
 }
-$('mg').onchange = $('lw').oninput = applyLines;
+$('mg').onchange = $('lw').oninput = $('rk').oninput = applyLines;
 
 function meshOf(T, color) {                   // สามเหลี่ยม Z-up → mesh ของ Three (Y-up)
   const pos = new Float32Array(T.length);
@@ -469,7 +477,7 @@ function show() {
   if (M.redges.length) {
     const P = [];
     for (let i = 0; i < M.redges.length; i += 3) P.push(M.redges[i], M.redges[i+2], -M.redges[i+1]);
-    edgeGrp.add(fatLines(P));
+    edgeGrp.add(fatLines(P, roadMat));
   }
   const cols = [dark ? 0x4a5560 : 0xb9b3a4, 0x3f86c9, 0x6fa86a];   // ดิน, น้ำ, สีเขียว
   for (let c = 0; c < 3; c++) {
