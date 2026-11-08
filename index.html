@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>โมเดลเมือง 3D</title>
+<meta name="theme-color" content="#1f5fa8">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
 :root{--bg:#f7f6f2;--fg:#1d2733;--mut:#6b7684;--line:#d5d8dc;--acc:#1f5fa8}
@@ -24,16 +29,31 @@ button:disabled{opacity:.4}
 button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 input[type=range]{flex:1;min-width:120px}
 #st{color:var(--mut);font-size:14px;min-height:1.3em}
+/* --- จอมือถือ: แผนที่เต็มจอ เมนูเป็นลิ้นชักซ้าย --- */
+header{display:none}
+#stage{position:fixed;inset:0;flex:none}
+.panel{position:fixed;left:0;top:0;bottom:0;width:min(86vw,340px);overflow-y:auto;z-index:2000;
+  align-content:start;border-top:0;border-right:1px solid var(--line);background:var(--bg);
+  padding:12px 14px calc(16px + env(safe-area-inset-bottom));
+  transform:translateX(-105%);transition:transform .22s ease;box-shadow:2px 0 14px rgba(0,0,0,.25)}
+.panel.open{transform:none}
+.fl{position:fixed;z-index:1500;border-radius:22px;padding:10px 16px;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+#menu{left:10px;top:10px}
+#fab{right:10px;bottom:48px;background:var(--acc);color:#fff;border-color:var(--acc)}
+#st{position:fixed;left:10px;right:10px;bottom:100px;z-index:1500;background:var(--bg);color:var(--fg);
+  border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+#st:empty{display:none}
+#top{position:fixed;left:10px;right:58px;top:10px;z-index:1500;display:flex;gap:6px}
+#top button{border-radius:22px;padding:10px 12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+#top input{flex:1;min-width:0;font:inherit;padding:10px 14px;border:1px solid var(--line);border-radius:22px;
+  background:var(--bg);color:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.3)}
 </style>
 </head>
 <body>
 <header>โมเดลเมือง 3D จากข้อมูล OpenStreetMap</header>
 <div id="stage"><div id="map"></div><div id="view"></div></div>
-<div class="panel">
-  <div class="row">
-    <input id="q" type="search" placeholder="ค้นหาสถานที่ เช่น เชียงดาว" style="flex:1;min-width:140px;font:inherit;padding:9px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)">
-    <button id="sr">ค้นหา</button>
-  </div>
+<div class="panel" id="panel">
+  <div class="row" style="justify-content:space-between"><b>เมนูคำสั่ง</b><button id="close">✕ ปิด</button></div>
   <div class="row">
     <label><input id="ct" type="checkbox" checked> ภูมิประเทศ 3D</label>
     <label><input id="cl" type="checkbox" checked> เส้นชั้นความสูง</label>
@@ -59,6 +79,7 @@ input[type=range]{flex:1;min-width:120px}
   </div>
   <div class="row">
     <button id="loc">ตำแหน่งของฉัน</button>
+    <button id="inst" hidden>ติดตั้งแอป</button>
     <button id="go" class="p">สร้างโมเดล</button>
     <button id="back" disabled>กลับไปแผนที่</button>
   </div>
@@ -70,8 +91,10 @@ input[type=range]{flex:1;min-width:120px}
     <button id="svg" disabled>ดาวน์โหลด SVG (Illustrator)</button>
     <button id="ifc" disabled>ดาวน์โหลด IFC</button>
   </div>
-  <div id="st">เลื่อนแผนที่ให้กรอบอยู่ตรงพื้นที่ที่ต้องการ แล้วกด "สร้างโมเดล"</div>
 </div>
+<div id="st">เลื่อนแผนที่ให้กรอบอยู่ตรงพื้นที่ที่ต้องการ แล้วกด "สร้างโมเดล"</div>
+<div id="top"><button id="menu">☰ เมนู</button><input id="q" type="search" placeholder="ค้นหาสถานที่"><button id="sr" aria-label="ค้นหา">🔍</button></div>
+<button id="fab" class="fl">สร้างโมเดล</button>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -79,7 +102,8 @@ input[type=range]{flex:1;min-width:120px}
 const $ = id => document.getElementById(id);
 
 /* ---------- 1. แผนที่ + กรอบพื้นที่ ---------- */
-const map = L.map('map').setView([13.7563, 100.5018], 16);
+const map = L.map('map', {zoomControl: false}).setView([13.7563, 100.5018], 16);
+L.control.zoom({position: 'topright'}).addTo(map);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '© OpenStreetMap contributors'
 }).addTo(map);
@@ -99,7 +123,7 @@ function drawRect() {
 map.on('move', drawRect);
 $('size').oninput = drawRect;
 drawRect();
-$('loc').onclick = () => map.locate({setView:true, maxZoom:16});
+$('loc').onclick = () => { closeMenu(); map.locate({setView:true, maxZoom:16}); };
 map.on('locationerror', () => $('st').textContent = 'เข้าถึงตำแหน่งไม่ได้ ตรวจสอบสิทธิ์ตำแหน่งของเบราว์เซอร์');
 
 /* ---------- 2. ดึงข้อมูลจาก Overpass ---------- */
@@ -107,10 +131,10 @@ let M = null; // {tris:[x,y,z,...], roads:[[[x,y],...]], nb}
 
 async function build() {
   const b = bounds();
-  $('go').disabled = true;
+  closeMenu(); $('go').disabled = $('fab').disabled = true;
   $('st').textContent = 'กำลังดึงข้อมูลอาคารและถนน...';
   const bb = `${b.s},${b.w},${b.n},${b.e}`;
-  const q = `[out:json][timeout:90];(way["building"](${bb});way["highway"](${bb});way["natural"~"^(water|wood)$"](${bb});way["leisure"="park"](${bb});way["landuse"~"^(grass|forest|meadow)$"](${bb}););out geom;`;
+  const q = `[out:json][timeout:90];(way["building"](${bb});way["highway"](${bb});way["waterway"~"^(river|canal|stream|riverbank)$"](${bb});relation["natural"="water"](${bb});way["natural"~"^(water|wood)$"](${bb});way["leisure"="park"](${bb});way["landuse"~"^(grass|forest|meadow)$"](${bb}););out geom;`;
   try {
     let j = null, last = '';
     for (const ep of ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter']) {
@@ -144,7 +168,7 @@ async function build() {
   } catch (e) {
     $('st').textContent = 'ผิดพลาด: ' + e.message + ' (ลองลดขนาดพื้นที่แล้วกดใหม่)';
   }
-  $('go').disabled = false;
+  $('go').disabled = $('fab').disabled = false;
 }
 $('go').onclick = build;
 
@@ -152,7 +176,7 @@ $('go').onclick = build;
 async function search() {
   const q = $('q').value.trim(); if (!q) return;
   viewMode(false);
-  $('st').textContent = 'กำลังค้นหา...';
+  closeMenu(); $('st').textContent = 'กำลังค้นหา...';
   try {
     const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
     const j = await r.json();
@@ -262,6 +286,41 @@ function marching(Z, nx, ny, x0, y0, dx, dy, L) {   // marching squares แล�
   return lines;
 }
 
+/* ---------- 2.9 ชนิดถนนและสี (โทนเดียวกับ Google Maps) ---------- */
+const RCLS = [
+  {layer:'ROADS_EXPRESSWAY', c:0xf4a43a, css:'#f4a43a'},   // ทางด่วน
+  {layer:'ROADS_MAIN',       c:0xfcd34d, css:'#fcd34d'},   // ทางหลัก
+  {layer:'ROADS_SECONDARY',  c:0xfff0b3, css:'#fff0b3'},   // ถนนรอง
+  {layer:'ROADS_LOCAL',      c:0xffffff, css:'#ffffff'},   // ซอย
+  {layer:'ROADS_PATH',       c:0xd5d5d5, css:'#d5d5d5'},   // ทางเดิน/ทางเล็ก
+  {layer:'RIVERS',           c:0x5aa6e0, css:'#a8d4f2'}    // แม่น้ำ/คลอง
+];
+const hwClass = h => /^motorway/.test(h) ? 0 : /^(trunk|primary)/.test(h) ? 1 : /^(secondary|tertiary)/.test(h) ? 2
+  : /^(residential|unclassified|service|living_street|road)$/.test(h) ? 3 : 4;
+
+function stitch(parts) {                      // ต่อเส้นขอบแม่น้ำ/ทะเลสาบที่แยกเป็นหลายท่อนให้เป็นวงปิด
+  const same = (p, q) => p[0] === q[0] && p[1] === q[1];
+  const segs = parts.filter(m => m.length > 1).map(m => m.slice()), out = [];
+  while (segs.length) {
+    let ring = segs.pop(), moved = true;
+    while (moved && !same(ring[0], ring[ring.length-1])) {
+      moved = false;
+      for (let i = 0; i < segs.length; i++) {
+        const t = segs[i], a = ring[0], z = ring[ring.length-1];
+        if (same(z, t[0])) ring = ring.concat(t.slice(1));
+        else if (same(z, t[t.length-1])) ring = ring.concat(t.slice().reverse().slice(1));
+        else if (same(a, t[t.length-1])) ring = t.slice(0, -1).concat(ring);
+        else if (same(a, t[0])) ring = t.slice().reverse().slice(0, -1).concat(ring);
+        else continue;
+        segs.splice(i, 1); moved = true; break;
+      }
+    }
+    if (same(ring[0], ring[ring.length-1])) ring.pop();
+    if (ring.length > 2) out.push(ring);
+  }
+  return out;
+}
+
 /* ---------- 3. แปลงพิกัด + ดันอาคารขึ้นเป็น 3 มิติ ---------- */
 function convert(els, b) {
   const kx = 111320*Math.cos(b.c.lat*Math.PI/180), ky = 110540;
@@ -274,6 +333,13 @@ function convert(els, b) {
   };
   const RW = {motorway:14, trunk:14, primary:11, secondary:9, tertiary:7, residential:6, unclassified:6, service:4};
   for (const el of els) {
+    if (el.type === 'relation') {              // แม่น้ำ/ทะเลสาบที่เป็น multipolygon
+      const ws = (el.members || []).filter(m => m.type === 'way' && m.geometry && m.geometry.length > 1);
+      const outer = stitch(ws.filter(m => m.role !== 'inner').map(m => P(m.geometry)));
+      const inner = stitch(ws.filter(m => m.role === 'inner').map(m => P(m.geometry)));
+      for (const p of outer) W.push({p, h: inner});
+      continue;
+    }
     if (!el.geometry) continue;
     const t = el.tags || {};
     if (t.building) {
@@ -281,9 +347,13 @@ function convert(els, b) {
       let h = parseFloat(t.height);
       if (!(h > 0)) { const lv = parseFloat(t['building:levels']); h = lv > 0 ? lv*3 : 8; }
       B.push({p, h});
-    } else if (t.highway) R.push({p: P(el.geometry), w: RW[t.highway] || 3});
-    else if (t.natural === 'water') { const p = poly(el.geometry); if (p.length > 2) W.push(p); }
-    else { const p = poly(el.geometry); if (p.length > 2) G.push(p); }
+    } else if (t.highway) {
+      const k = hwClass(t.highway);
+      R.push({p: P(el.geometry), w: RW[t.highway] || [14,11,8,5,3][k], k});
+    } else if (/^(river|canal|stream)$/.test(t.waterway || '')) {
+      R.push({p: P(el.geometry), w: {river:30, canal:12, stream:5}[t.waterway], k: 5});
+    } else if (t.natural === 'water' || t.waterway === 'riverbank') { const p = poly(el.geometry); if (p.length > 2) W.push({p, h: []}); }
+    else { const p = poly(el.geometry); if (p.length > 2) G.push({p, h: []}); }
   }
   return {B, R, W, G};
 }
@@ -311,11 +381,11 @@ function addBuilding(p, h, T, hf) {
 function assemble(raw, tr) {
   const on = tr && $('ct').checked;
   const hf = on ? tr.h : () => 0;
-  const tris = [], rtris = [], roads = [], redges = [];
+  const tris = [], rcls = RCLS.map(() => []), roads = [], redges = [];
   const bidx = [];
   for (const o of raw.B) { const s = tris.length; addBuilding(o.p, o.h, tris, hf); bidx.push([s, tris.length]); }
-  for (const o of raw.R) addRoad(o.p, o.w, hf, rtris, roads, redges);
-  return {raw, bidx, tris, rtris, roads, redges, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
+  for (const o of raw.R) addRoad(o.p, o.w, hf, rcls[o.k], o.k === 5 ? [] : roads, o.k === 5 ? [] : redges);
+  return {raw, bidx, tris, rcls, roads, redges, nb: raw.B.length, contours: tr ? tr.contours : [], terr: on ? terrMesh(tr, raw) : []};
 }
 
 function addRoad(p, w, hf, R, C, EG) {            // ถนนเป็นแถบกว้างตามประเภท วางทับพื้นดินสูงขึ้น 0.3 ม.
@@ -338,9 +408,9 @@ function addRoad(p, w, hf, R, C, EG) {            // ถนนเป็นแถ
 
 function terrMesh(tr, raw) {                  // ตารางละ 2 สามเหลี่ยม แยกชนิด 0=ดิน 1=น้ำ 2=พื้นที่สีเขียว
   const {n1, half, d, Z, mn} = tr, W = n1+1, out = [];
-  const polys = [...raw.W.map(p => [p,1]), ...raw.G.map(p => [p,2])].map(([p, c]) => {
-    const xs = p.map(v => v[0]), ys = p.map(v => v[1]);
-    return {p, c, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys)};
+  const polys = [...raw.W.map(o => [o,1]), ...raw.G.map(o => [o,2])].map(([o, c]) => {
+    const p = o.p, xs = p.map(v => v[0]), ys = p.map(v => v[1]);
+    return {p, h: o.h, c, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys)};
   });
   const inside = (x, y, P) => {
     let r = false;
@@ -353,7 +423,7 @@ function terrMesh(tr, raw) {                  // ตารางละ 2 สา�
     const cx = -half + (i+.5)*d, cy = -half + (j+.5)*d;
     let c = 0;
     for (const o of polys)
-      if (cx >= o.x0 && cx <= o.x1 && cy >= o.y0 && cy <= o.y1 && inside(cx, cy, o.p)) { if (o.c === 1) { c = 1; break; } c = 2; }
+      if (cx >= o.x0 && cx <= o.x1 && cy >= o.y0 && cy <= o.y1 && inside(cx, cy, o.p) && !o.h.some(hh => inside(cx, cy, hh))) { if (o.c === 1) { c = 1; break; } c = 2; }
     const x0 = -half + i*d, y0 = -half + j*d, x1 = x0 + d, y1 = y0 + d;
     out.push({c, t: [x0,y0,zz(i,j), x1,y0,zz(i+1,j), x1,y1,zz(i+1,j+1), x0,y0,zz(i,j), x1,y1,zz(i+1,j+1), x0,y1,zz(i,j+1)]});
   }
@@ -431,6 +501,8 @@ function draw() {
 function viewMode(on) {
   $('view').style.display = on ? 'block' : 'none';
   $('map').style.display = on ? 'none' : 'block';
+  $('fab').dataset.v = on ? '1' : '0';
+  $('fab').textContent = on ? 'กลับไปแผนที่' : 'สร้างโมเดล';
   if (on) resize(); else map.invalidateSize();
 }
 $('back').onclick = () => viewMode(false);
@@ -485,7 +557,7 @@ function show() {
   grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color: dark ? 0x9aa3ad : 0xcdc8bd, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1})));
   edgeGrp = new THREE.Group(); grp.add(edgeGrp);
   if (M.tris.length && M.nb <= 15000) edgeGrp.add(fatLines(new THREE.EdgesGeometry(g, 25).attributes.position.array));
-  if (M.rtris.length) grp.add(meshOf(M.rtris, dark ? 0xd8d8d8 : 0x3a3f47));
+  RCLS.forEach((r, k) => { if (M.rcls[k].length) grp.add(meshOf(M.rcls[k], r.c)); });
   if (M.redges.length) {
     const P = [];
     for (let i = 0; i < M.redges.length; i += 3) P.push(M.redges[i], M.redges[i+2], -M.redges[i+1]);
@@ -522,8 +594,9 @@ function dl(name, text, type) {
 function exportDXF() {                        // DXF R12 อ่านได้ทุกเวอร์ชันของ AutoCAD
   const f = v => (+v).toFixed(3), T = M.tris, out = [];
   out.push('0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n1\n0\nLTYPE\n2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0\n0\nENDTAB');
-  out.push('0\nTABLE\n2\nLAYER\n70\n7');
-  for (const l of ['BUILDINGS','ROADS','ROAD_CENTER','CONTOURS','TERRAIN','WATER','GREEN']) out.push(`0\nLAYER\n2\n${l}\n70\n0\n62\n7\n6\nCONTINUOUS`);
+  out.push('0\nTABLE\n2\nLAYER\n70\n12');
+  for (const [l, cc] of [['BUILDINGS',7],['ROADS_EXPRESSWAY',30],['ROADS_MAIN',50],['ROADS_SECONDARY',2],['ROADS_LOCAL',7],['ROADS_PATH',8],['RIVERS',140],['ROAD_CENTER',9],['CONTOURS',32],['TERRAIN',253],['WATER',5],['GREEN',3]])
+    out.push(`0\nLAYER\n2\n${l}\n70\n0\n62\n${cc}\n6\nCONTINUOUS`);
   out.push('0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES');
   const idx = [0,3,6,6];
   for (let i = 0; i < T.length; i += 9) {
@@ -538,7 +611,7 @@ function exportDXF() {                        // DXF R12 อ่านได้�
       out.push(s);
     }
   };
-  faces(M.rtris, 'ROADS');
+  RCLS.forEach((r, k) => faces(M.rcls[k], r.layer));
   ['TERRAIN', 'WATER', 'GREEN'].forEach((L, c) => {
     const A = [];
     for (const q of M.terr) if (q.c === c) A.push(...q.t);
@@ -574,7 +647,8 @@ function exportSTL() {                        // อาคารอย่าง�
 }
 /* ---------- 5.1 DAE (Collada) และ OBJ สำหรับ SketchUp / Rhino / Blender ---------- */
 function parts() {                            // แยกกลุ่มวัตถุตามวัสดุ
-  const P = [{n:'BUILDINGS', T:M.tris, c:[.80,.78,.73]}, {n:'ROADS', T:M.rtris, c:[.23,.25,.28]}];
+  const P = [{n:'BUILDINGS', T:M.tris, c:[.80,.78,.73]}];
+  RCLS.forEach((r, k) => P.push({n: r.layer, T: M.rcls[k], c: [r.c >> 16 & 255, r.c >> 8 & 255, r.c & 255].map(x => x/255)}));
   [['TERRAIN',[.72,.70,.64]], ['WATER',[.25,.53,.79]], ['GREEN',[.44,.66,.42]]].forEach(([n, c], i) => {
     const T = [];
     for (const q of M.terr) if (q.c === i) T.push(...q.t);
@@ -620,14 +694,20 @@ function exportDAE() {
 function exportSVG() {                        // 1 หน่วย = 1 เมตร แยกเลเยอร์เป็นกลุ่ม <g id=...>
   const half = +$('size').value*500, R = M.raw, f = v => v.toFixed(2);
   const pts = p => p.map(v => f(v[0]) + ',' + f(-v[1])).join(' ');
+  const ringD = p => 'M' + p.map(v => f(v[0]) + ',' + f(-v[1])).join('L') + 'Z';
   let s = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${half*2}" height="${half*2}" viewBox="${-half} ${-half} ${half*2} ${half*2}">\n`;
   s += `<defs><clipPath id="clip"><rect x="${-half}" y="${-half}" width="${half*2}" height="${half*2}"/></clipPath></defs>\n`;
   s += '<g clip-path="url(#clip)" fill="none" stroke-linejoin="round" stroke-linecap="round">\n';
-  s += '<g id="GREEN" fill="#d6ead0" stroke="#111" stroke-width="0.5">' + R.G.map(p => `<polygon points="${pts(p)}"/>`).join('') + '</g>\n';
-  s += '<g id="WATER" fill="#bfe0f5" stroke="#111" stroke-width="0.5">' + R.W.map(p => `<polygon points="${pts(p)}"/>`).join('') + '</g>\n';
+  s += '<g id="GREEN" fill="#d6ead0" stroke="#111" stroke-width="0.5">' + R.G.map(o => `<path d="${ringD(o.p)}"/>`).join('') + '</g>\n';
+  s += '<g id="WATER" fill="#bfe0f5" stroke="#111" stroke-width="0.5">' + R.W.map(o => `<path fill-rule="evenodd" d="${[o.p, ...o.h].map(ringD).join('')}"/>`).join('') + '</g>\n';
   s += '<g id="CONTOURS" stroke="#9a6b3d" stroke-width="0.3">' + (M.contours || []).map(c => `<polyline points="${pts(c.pts)}"/>`).join('') + '</g>\n';
-  s += '<g id="ROADS_CASING" stroke="#111">' + R.R.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w+1.2}"/>`).join('') + '</g>\n';
-  s += '<g id="ROADS" stroke="#fff">' + R.R.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w}"/>`).join('') + '</g>\n';
+  for (const k of [5, 4, 3, 2, 1, 0]) {        // วาดถนนเล็กก่อน ถนนใหญ่ทับ
+    const rs = R.R.filter(o => o.k === k);
+    if (!rs.length) continue;
+    const L = RCLS[k].layer;
+    if (k !== 5) s += `<g id="${L}_CASING" stroke="#111">` + rs.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w+1.2}"/>`).join('') + '</g>\n';
+    s += `<g id="${L}" stroke="${RCLS[k].css}">` + rs.map(o => `<polyline points="${pts(o.p)}" stroke-width="${o.w}"/>`).join('') + '</g>\n';
+  }
   s += '<g id="BUILDINGS" fill="#e6e1d6" stroke="#111" stroke-width="0.8">' + R.B.map(o => `<polygon points="${pts(o.p)}"/>`).join('') + '</g>\n';
   s += '</g>\n</svg>\n';
   dl('city.svg', s, 'image/svg+xml');
@@ -676,10 +756,11 @@ function exportIFC() {                        // IFC4 ใช้ IfcTriangulatedF
     const sh = body(M.tris.slice(a, b));
     blds.push(add(`IFCBUILDING('${guid()}',$,'Building ${i+1}',$,$,${pl},${sh},$,.ELEMENT.,$,$,$)`));
   });
-  if (M.rtris.length) {
-    const sh = body(M.rtris);
-    others.push(add(`IFCBUILDINGELEMENTPROXY('${guid()}',$,'Roads',$,$,${pl},${sh},$,.NOTDEFINED.)`));
-  }
+  RCLS.forEach((r, k) => {
+    if (!M.rcls[k].length) return;
+    const sh = body(M.rcls[k]);
+    others.push(add(`IFCBUILDINGELEMENTPROXY('${guid()}',$,'${r.layer}',$,$,${pl},${sh},$,.NOTDEFINED.)`));
+  });
   ['Terrain', 'Water', 'Green'].forEach((n, c) => {
     const T = [];
     for (const q of M.terr) if (q.c === c) T.push(...q.t);
@@ -700,6 +781,27 @@ $('dae').onclick = exportDAE;
 $('obj').onclick = exportOBJ;
 $('dxf').onclick = exportDXF;
 $('stl').onclick = exportSTL;
+
+/* ---------- 5.9 เมนูลิ้นชักซ้าย + ปุ่มลอย ---------- */
+function closeMenu() { $('panel').classList.remove('open'); }
+$('menu').onclick = () => $('panel').classList.toggle('open');
+$('close').onclick = closeMenu;
+$('stage').addEventListener('pointerdown', closeMenu);
+$('fab').onclick = () => { if ($('fab').dataset.v === '1') viewMode(false); else build(); };
+$('st').onclick = () => { $('st').textContent = ''; };
+
+/* ---------- 6. PWA: ติดตั้งเป็นแอป + service worker ---------- */
+let installEvt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('inst').hidden = false; });
+$('inst').onclick = async () => {
+  if (!installEvt) return;
+  installEvt.prompt();
+  await installEvt.userChoice;
+  installEvt = null; $('inst').hidden = true;
+};
+addEventListener('appinstalled', () => { $('inst').hidden = true; });
+if ('serviceWorker' in navigator)
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 </script>
 </body>
 </html>
